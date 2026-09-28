@@ -23,8 +23,9 @@ try:
     NEIS_KEY = st.secrets["NEIS_KEY"]
 except Exception:
     st.error(
-        "NEIS_KEY가 설정되어 있지 않습니다. "
-        "Streamlit Cloud의 Secrets에 NEIS_KEY를 등록해주세요."
+        "NEIS_KEY가 설정되어 있지 않습니다.\n\n"
+        "Streamlit Cloud의 Settings → Secrets에서 "
+        "NEIS_KEY를 등록해주세요."
     )
     st.stop()
 
@@ -53,25 +54,21 @@ def search_schools(keyword):
         )
 
         response.raise_for_status()
-
         data = response.json()
 
     except Exception as e:
-        st.error(
-            f"학교 정보를 불러오는 중 오류가 발생했습니다: {e}"
-        )
-        return pd.DataFrame()
+        return pd.DataFrame(), f"학교 정보를 불러오는 중 오류가 발생했습니다: {e}"
 
     if "schoolInfo" not in data:
-        return pd.DataFrame()
+        return pd.DataFrame(), None
 
     try:
         rows = data["schoolInfo"][1]["row"]
-    except (KeyError, IndexError):
-        return pd.DataFrame()
+    except (KeyError, IndexError, TypeError):
+        return pd.DataFrame(), None
 
     if not rows:
-        return pd.DataFrame()
+        return pd.DataFrame(), None
 
     df = pd.DataFrame(rows)
 
@@ -88,7 +85,10 @@ def search_schools(keyword):
         if col in df.columns
     ]
 
-    return df[existing_columns]
+    if not existing_columns:
+        return pd.DataFrame(), None
+
+    return df[existing_columns], None
 
 
 # =========================================================
@@ -102,6 +102,7 @@ def get_meals(
     month
 ):
 
+    # 해당 월의 첫 번째 날짜
     start_date = f"{year}{month:02d}01"
 
     # 다음 달 1일 계산
@@ -118,6 +119,7 @@ def get_meals(
             1
         )
 
+    # 해당 월의 마지막 날짜
     end_date = (
         next_month - pd.Timedelta(days=1)
     ).strftime("%Y%m%d")
@@ -128,7 +130,7 @@ def get_meals(
     page = 1
 
     # =====================================================
-    # 한 달 전체 데이터를 가져오기 위해 페이지 반복
+    # 급식 데이터 페이지별 조회
     # =====================================================
     while True:
 
@@ -151,25 +153,24 @@ def get_meals(
             )
 
             response.raise_for_status()
-
             data = response.json()
 
         except Exception as e:
-            st.error(
+            return pd.DataFrame(), (
                 f"급식 데이터를 불러오는 중 오류가 발생했습니다: {e}"
             )
-            return pd.DataFrame()
 
+        # 데이터가 없는 경우
         if "mealServiceDietInfo" not in data:
-            break
+            return pd.DataFrame(), None
 
         try:
             rows = data["mealServiceDietInfo"][1].get(
                 "row",
                 []
             )
-        except (KeyError, IndexError):
-            break
+        except (KeyError, IndexError, TypeError):
+            return pd.DataFrame(), None
 
         if not rows:
             break
@@ -182,8 +183,11 @@ def get_meals(
 
         page += 1
 
+    # =====================================================
+    # 데이터가 없는 경우
+    # =====================================================
     if not all_rows:
-        return pd.DataFrame()
+        return pd.DataFrame(), None
 
     df = pd.DataFrame(all_rows)
 
@@ -216,8 +220,7 @@ def get_meals(
 
     # =====================================================
     # 칼로리
-    # 예:
-    # "712.3 Kcal" → 712.3
+    # 예: 712.3 Kcal → 712.3
     # =====================================================
     df["칼로리"] = (
         df["CAL_INFO"]
@@ -239,7 +242,7 @@ def get_meals(
     )
 
     # =====================================================
-    # 필요한 열만 남김
+    # 필요한 열만 남기기
     # =====================================================
     df = df[
         [
@@ -250,12 +253,17 @@ def get_meals(
         ]
     ]
 
+    # =====================================================
     # 날짜순 정렬
+    # =====================================================
     df = df.sort_values(
-        ["날짜", "급식구분"]
+        [
+            "날짜",
+            "급식구분"
+        ]
     ).reset_index(drop=True)
 
-    return df
+    return df, None
 
 
 # =========================================================
@@ -268,7 +276,6 @@ st.write(
     "여러 가지 질문을 데이터로 분석할 수 있습니다."
 )
 
-
 st.divider()
 
 
@@ -278,3 +285,289 @@ st.divider()
 st.header("🏫 학교 선택")
 
 keyword = st.text_input(
+    "학교 이름을 입력하세요.",
+    placeholder="예: 송탄고등학교"
+)
+
+
+if keyword.strip():
+
+    schools, search_error = search_schools(
+        keyword.strip()
+    )
+
+    # API 오류
+    if search_error:
+
+        st.error(search_error)
+
+    # 검색 결과 없음
+    elif schools.empty:
+
+        st.warning(
+            "검색된 학교가 없습니다. "
+            "학교 이름을 다시 확인해주세요."
+        )
+
+    # 검색 결과 있음
+    else:
+
+        # =================================================
+        # 학교 표시명 만들기
+        # =================================================
+        schools["표시명"] = (
+            schools["SCHUL_NM"].astype(str)
+            + " · "
+            + schools["LCTN_SC_NM"].fillna("").astype(str)
+        )
+
+        selected_name = st.selectbox(
+            "학교를 선택하세요.",
+            schools["표시명"].tolist()
+        )
+
+        selected_school = schools[
+            schools["표시명"] == selected_name
+        ].iloc[0]
+
+        # =================================================
+        # 선택한 학교 정보 저장
+        # =================================================
+        st.session_state["office_code"] = (
+            selected_school["ATPT_OFCDC_SC_CODE"]
+        )
+
+        st.session_state["office_name"] = (
+            selected_school["ATPT_OFCDC_SC_NM"]
+        )
+
+        st.session_state["school_code"] = (
+            selected_school["SD_SCHUL_CODE"]
+        )
+
+        st.session_state["school_name"] = (
+            selected_school["SCHUL_NM"]
+        )
+
+        st.session_state["school_location"] = (
+            selected_school["LCTN_SC_NM"]
+        )
+
+        st.success(
+            f"현재 선택한 학교: "
+            f"**{selected_school['SCHUL_NM']}**"
+        )
+
+
+# =========================================================
+# 학교가 선택된 경우
+# =========================================================
+if "school_code" in st.session_state:
+
+    st.divider()
+
+    st.header("🍚 급식 확인")
+
+    st.write(
+        f"**{st.session_state['school_name']}**의 "
+        "원하는 월 급식을 확인할 수 있습니다."
+    )
+
+    # =====================================================
+    # 연도 / 월 선택
+    # =====================================================
+    now = datetime.now()
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+
+        selected_year = st.number_input(
+            "연도",
+            min_value=2020,
+            max_value=2035,
+            value=now.year,
+            step=1
+        )
+
+    with col2:
+
+        selected_month = st.selectbox(
+            "월",
+            list(range(1, 13)),
+            index=now.month - 1
+        )
+
+    # =====================================================
+    # 급식 불러오기 버튼
+    # =====================================================
+    if st.button(
+        "📥 급식 불러오기",
+        type="primary"
+    ):
+
+        with st.spinner(
+            "급식 데이터를 불러오는 중입니다..."
+        ):
+
+            meal_df, meal_error = get_meals(
+                st.session_state["office_code"],
+                st.session_state["school_code"],
+                selected_year,
+                selected_month
+            )
+
+        # API 오류
+        if meal_error:
+
+            st.error(meal_error)
+
+        # 데이터 없음
+        elif meal_df.empty:
+
+            st.warning(
+                f"{selected_year}년 "
+                f"{selected_month}월에는 "
+                "급식 데이터가 없습니다."
+            )
+
+            # 이전 데이터 삭제
+            st.session_state.pop(
+                "meal_df",
+                None
+            )
+
+        # 데이터 있음
+        else:
+
+            # =================================================
+            # 급식 데이터 저장
+            # =================================================
+            st.session_state["meal_df"] = meal_df
+
+            st.session_state["meal_year"] = (
+                selected_year
+            )
+
+            st.session_state["meal_month"] = (
+                selected_month
+            )
+
+            st.success(
+                f"{selected_year}년 "
+                f"{selected_month}월 급식 데이터를 "
+                f"{len(meal_df)}건 불러왔습니다."
+            )
+
+
+# =========================================================
+# 불러온 급식 표시
+# =========================================================
+if "meal_df" in st.session_state:
+
+    st.divider()
+
+    st.header("📋 급식표")
+
+    meal_df = st.session_state["meal_df"].copy()
+
+    # =====================================================
+    # 화면 표시용 데이터
+    # =====================================================
+    display_df = meal_df.copy()
+
+    display_df["날짜"] = (
+        display_df["날짜"]
+        .dt.strftime("%Y-%m-%d")
+    )
+
+    display_df["칼로리"] = (
+        display_df["칼로리"].apply(
+            lambda x:
+            f"{x:,.1f} kcal"
+            if pd.notna(x)
+            else "-"
+        )
+    )
+
+    display_df = display_df.rename(
+        columns={
+            "급식구분": "급식 구분"
+        }
+    )
+
+    # =====================================================
+    # 급식표
+    # =====================================================
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # =====================================================
+    # 데이터 요약
+    # =====================================================
+    st.divider()
+
+    st.header("📊 데이터 요약")
+
+    col1, col2, col3 = st.columns(3)
+
+    # -----------------------------------------------------
+    # 급식 제공 날짜
+    # -----------------------------------------------------
+    with col1:
+
+        meal_days = meal_df[
+            "날짜"
+        ].nunique()
+
+        st.metric(
+            "급식이 제공된 날짜",
+            f"{meal_days}일"
+        )
+
+    # -----------------------------------------------------
+    # 평균 칼로리
+    # -----------------------------------------------------
+    with col2:
+
+        avg_calorie = meal_df[
+            "칼로리"
+        ].mean()
+
+        if pd.notna(avg_calorie):
+
+            st.metric(
+                "평균 칼로리",
+                f"{avg_calorie:,.1f} kcal"
+            )
+
+        else:
+
+            st.metric(
+                "평균 칼로리",
+                "-"
+            )
+
+    # -----------------------------------------------------
+    # 데이터 개수
+    # -----------------------------------------------------
+    with col3:
+
+        st.metric(
+            "급식 데이터",
+            f"{len(meal_df)}건"
+        )
+
+
+# =========================================================
+# 아직 급식을 불러오지 않은 경우
+# =========================================================
+else:
+
+    st.info(
+        "학교를 선택한 뒤 연도와 월을 정하고 "
+        "'급식 불러오기'를 눌러주세요."
+    )
